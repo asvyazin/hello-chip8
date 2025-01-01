@@ -18,8 +18,14 @@ common warnings
 executable hello-chip8
     import:           warnings
     main-is:          Main.hs
-    -- other-modules:
+    other-modules:
+      Instructions,
+      Tracing
     -- other-extensions:
-    build-depends:    base ^>=4.19.1.0
+    build-depends:    base ^>=4.19.1.0,
+                      binary,
+                      bytestring,
+                      containers,
+                      mtl
     hs-source-dirs:   app
     default-language: GHC2021
