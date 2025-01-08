@@ -26,6 +26,7 @@ executable hello-chip8
                       binary,
                       bytestring,
                       containers,
+                      llvm-tf,
                       mtl
     hs-source-dirs:   app
     default-language: GHC2021
