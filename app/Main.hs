@@ -10,7 +10,8 @@ import Data.Tuple (swap)
 import Data.Word
 import GHC.Stack (HasCallStack)
 import Instructions
-import LLVM.Core (CmpPredicate (CmpEQ, CmpNE), CodeGenModule, Function, Global, IsConst (constOf), Linkage (PrivateLinkage), add, and, br, cmp, condBr, createBasicBlock, createFunction, createGlobal, defineBasicBlock, defineModule, ext, load, newModule, or, ret, shl, shr, store, sub, valueOf, writeBitcodeToFile, xor)
+import LLVM.Core (CmpPredicate (CmpEQ, CmpNE), CodeGenModule, Function, Global, IsConst (constOf), Linkage (ExternalLinkage, PrivateLinkage), add, and, br, cmp, condBr, createBasicBlock, createFunction, createGlobal, defineBasicBlock, defineModule, ext, load, newModule, or, ret, setDataLayout, setTarget, shl, shr, store, sub, valueOf, writeBitcodeToFile, xor)
+import LLVM.Util.Optimize (optimizeModule)
 import Tracing
 
 newtype TraceFunction = TraceFunction {funcStart :: Address} deriving (Eq, Ord)
@@ -67,8 +68,8 @@ disasmToFunctions filename = do
 registersCount :: Int
 registersCount = 16
 
-genFunction :: (HasCallStack) => Global Word16 -> Map Int (Global Word8) -> Map Address InstructionData -> Map Address (NonEmpty Address) -> Address -> CodeGenModule (Function (IO ()))
-genFunction iGlobal registers instructions functionInstructions funcStart = do
+genFunction :: (HasCallStack) => Linkage -> Global Word16 -> Map Int (Global Word8) -> Map Address InstructionData -> Map Address (NonEmpty Address) -> Address -> CodeGenModule (Function (IO ()))
+genFunction linkage iGlobal registers instructions functionInstructions funcStart = do
   let curFuncInstructions =
         functionInstructions Map.! funcStart
       extractLabels instrs = do
@@ -92,7 +93,7 @@ genFunction iGlobal registers instructions functionInstructions funcStart = do
         extractLabels $ NEList.toList $ NEList.map (instructions Map.!) curFuncInstructions
       labelAddressesSet =
         Set.fromList labelAddresses
-  createFunction PrivateLinkage $ do
+  createFunction linkage $ do
     blocks <-
       Map.fromList
         <$> forM
@@ -180,7 +181,11 @@ genFunction iGlobal registers instructions functionInstructions funcStart = do
                 InstRts ->
                   ret ()
                 invalidInstr -> error ("Invalid instruction: " ++ show invalidInstr)
-            [a1] ->
+            [a1] -> do
+              let gotoNext =
+                    if Set.member a1 labelAddressesSet
+                      then br (blocks Map.! a1)
+                      else loop a1
               case instr of
                 InstJump jumpAddr -> do
                   let block =
@@ -188,22 +193,22 @@ genFunction iGlobal registers instructions functionInstructions funcStart = do
                   br block
                   pure ()
                 InstSys _ ->
-                  loop a1
+                  gotoNext
                 InstClr ->
                   -- TODO: implement CLR
-                  loop a1
+                  gotoNext
                 InstLoad iReg w8 -> do
                   let reg =
                         getR iReg
                   store (valueOf w8) reg
-                  loop a1
+                  gotoNext
                 InstAdd iReg w8 -> do
                   let reg =
                         getR iReg
                   regV <- load reg
                   res <- add regV (valueOf w8)
                   store res reg
-                  loop a1
+                  gotoNext
                 InstMove iReg1 iReg2 -> do
                   let reg1 =
                         getR iReg1
@@ -211,7 +216,7 @@ genFunction iGlobal registers instructions functionInstructions funcStart = do
                         getR iReg2
                   reg2V <- load reg2
                   store reg2V reg1
-                  loop a1
+                  gotoNext
                 InstOr iReg1 iReg2 -> do
                   let reg1 =
                         getR iReg1
@@ -221,7 +226,7 @@ genFunction iGlobal registers instructions functionInstructions funcStart = do
                   reg2V <- load reg2
                   res <- LLVM.Core.or reg1V reg2V
                   store res reg1
-                  loop a1
+                  gotoNext
                 InstAnd iReg1 iReg2 -> do
                   let reg1 =
                         getR iReg1
@@ -231,7 +236,7 @@ genFunction iGlobal registers instructions functionInstructions funcStart = do
                   reg2V <- load reg2
                   res <- LLVM.Core.and reg1V reg2V
                   store res reg1
-                  loop a1
+                  gotoNext
                 InstXor iReg1 iReg2 -> do
                   let reg1 =
                         getR iReg1
@@ -241,7 +246,7 @@ genFunction iGlobal registers instructions functionInstructions funcStart = do
                   reg2V <- load reg2
                   res <- LLVM.Core.xor reg1V reg2V
                   store res reg1
-                  loop a1
+                  gotoNext
                 InstAddr iReg1 iReg2 -> do
                   let reg1 =
                         getR iReg1
@@ -251,7 +256,7 @@ genFunction iGlobal registers instructions functionInstructions funcStart = do
                   reg2V <- load reg2
                   res <- add reg1V reg2V
                   store res reg1
-                  loop a1
+                  gotoNext
                 InstSub iReg1 iReg2 -> do
                   let reg1 =
                         getR iReg1
@@ -261,7 +266,7 @@ genFunction iGlobal registers instructions functionInstructions funcStart = do
                   reg2V <- load reg2
                   res <- sub reg1V reg2V
                   store res reg1
-                  loop a1
+                  gotoNext
                 InstShr iReg1 iReg2 -> do
                   let reg1 =
                         getR iReg1
@@ -271,7 +276,7 @@ genFunction iGlobal registers instructions functionInstructions funcStart = do
                   reg2V <- load reg2
                   res <- shr reg1V reg2V
                   store res reg1
-                  loop a1
+                  gotoNext
                 InstShl iReg1 iReg2 -> do
                   let reg1 =
                         getR iReg1
@@ -281,19 +286,19 @@ genFunction iGlobal registers instructions functionInstructions funcStart = do
                   reg2V <- load reg2
                   res <- shl reg1V reg2V
                   store res reg1
-                  loop a1
+                  gotoNext
                 InstLoadI (Address w16) -> do
                   store (valueOf w16) iGlobal
-                  loop a1
+                  gotoNext
                 InstDraw iReg1 iReg2 w8 -> do
                   -- TODO implement DRAW
-                  loop a1
+                  gotoNext
                 InstRand iReg w8 -> do
                   -- TODO implement RAND
-                  loop a1
+                  gotoNext
                 InstLoadD iReg -> do
                   -- TODO implement LOADD
-                  loop a1
+                  gotoNext
                 InstAddI iReg -> do
                   let reg =
                         getR iReg
@@ -302,30 +307,30 @@ genFunction iGlobal registers instructions functionInstructions funcStart = do
                   regV16 <- ext regV
                   res <- add iv regV16
                   store res iGlobal
-                  loop a1
+                  gotoNext
                 InstMoveD iReg -> do
                   let reg =
                         getR iReg
                   store (valueOf (0 :: Word8)) reg
-                  loop a1
+                  gotoNext
                 InstStor iReg -> do
                   let reg =
                         getR iReg
                   -- TODO implement STOR
-                  loop a1
+                  gotoNext
                 InstBcd iReg -> do
                   -- TODO implement BCD
-                  loop a1
+                  gotoNext
                 InstRead iReg -> do
                   -- TODO implement READ
-                  loop a1
+                  gotoNext
                 InstLdspr iReg -> do
                   -- TODO implement LDSPR
-                  loop a1
+                  gotoNext
                 invalidInstr -> error ("Instruction is not supported yet: " ++ show invalidInstr)
             _ -> error "Invalid nextAddresses"
         getR (Register w8) =
-          registers Map.! (fromIntegral w8)
+          registers Map.! fromIntegral w8
         getB addr =
           blocks Map.! addr
     void $ loop funcStart
@@ -337,6 +342,8 @@ genFunction iGlobal registers instructions functionInstructions funcStart = do
 
 mainFunc :: (HasCallStack) => Map Address InstructionData -> Map Address TraceFunction -> CodeGenModule (Function (IO ()))
 mainFunc instructions functions = do
+  setTarget "x86_64"
+  setDataLayout "e"
   let createRegister i = do
         globalVar <- createGlobal True PrivateLinkage (constOf (0 :: Word8))
         pure (i, globalVar)
@@ -355,7 +362,11 @@ mainFunc instructions functions = do
       <$> forM
         (Map.keys functionInstructions)
         ( \addr -> do
-            func <- genFunction iGlobal registers instructions functionInstructions addr
+            let linkage =
+                  if addr == startAddress
+                    then ExternalLinkage
+                    else PrivateLinkage
+            func <- genFunction linkage iGlobal registers instructions functionInstructions addr
             pure (addr, func)
         )
   pure $ generatedFunctions Map.! startAddress
@@ -372,4 +383,6 @@ main = do
         putStrLn $ "(" ++ show func ++ ") " ++ show addr ++ ":\t" ++ show inst
       mainModule <- newModule
       void $ defineModule mainModule $ mainFunc instructions functions
+      -- optimizeRes <- optimizeModule 2 mainModule
+      -- putStrLn $ "Optimize result: " ++ show optimizeRes
       writeBitcodeToFile "program.bitcode" mainModule
