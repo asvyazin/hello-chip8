@@ -1,3 +1,5 @@
+{-# LANGUAGE ForeignFunctionInterface #-}
+
 module Main where
 
 import Control.Monad (forM, forM_, void)
@@ -8,9 +10,10 @@ import Data.Map as Map
 import Data.Set as Set
 import Data.Tuple (swap)
 import Data.Word
+import Foreign.Ptr
 import GHC.Stack (HasCallStack)
 import Instructions
-import LLVM.Core (CmpPredicate (CmpEQ, CmpNE), CodeGenModule, Function, Global, IsConst (constOf), Linkage (ExternalLinkage, PrivateLinkage), add, and, br, cmp, condBr, createBasicBlock, createFunction, createGlobal, defineBasicBlock, defineModule, ext, load, newModule, or, ret, setDataLayout, setTarget, shl, shr, store, sub, valueOf, writeBitcodeToFile, xor)
+import LLVM.Core (CmpPredicate (CmpEQ, CmpNE), CodeGenModule, Function, Global, IsConst (constOf), Linkage (ExternalLinkage, PrivateLinkage), add, and, br, call, cmp, condBr, createBasicBlock, createFunction, createGlobal, defineBasicBlock, defineModule, ext, load, newModule, or, ret, setDataLayout, setTarget, shl, shr, staticFunction, store, sub, valueOf, writeBitcodeToFile, xor)
 import LLVM.Util.Optimize (optimizeModule)
 import Tracing
 
@@ -68,8 +71,14 @@ disasmToFunctions filename = do
 registersCount :: Int
 registersCount = 16
 
-genFunction :: (HasCallStack) => Linkage -> Global Word16 -> Map Int (Global Word8) -> Map Address InstructionData -> Map Address (NonEmpty Address) -> Address -> CodeGenModule (Function (IO ()))
-genFunction linkage iGlobal registers instructions functionInstructions funcStart = do
+keyIsPressed :: Word8 -> IO Bool
+keyIsPressed _ = pure False
+
+foreign import ccall "wrapper"
+  wrapKeyIsPressed :: (Word8 -> IO Bool) -> IO (FunPtr (Word8 -> IO Bool))
+
+genFunction :: (HasCallStack) => Linkage -> Global Word16 -> FunPtr (Word8 -> IO Bool) -> Map Int (Global Word8) -> Map Address InstructionData -> Map Address (NonEmpty Address) -> Address -> CodeGenModule (Function (IO ()))
+genFunction linkage iGlobal wrapped_keyIsPressed registers instructions functionInstructions funcStart = do
   let curFuncInstructions =
         functionInstructions Map.! funcStart
       extractLabels instrs = do
@@ -161,8 +170,10 @@ genFunction linkage iGlobal registers instructions functionInstructions funcStar
                         getB a1
                       b2 =
                         getB a2
-                  -- TODO implement
-                  br b1
+                  regV <- load reg
+                  native_keyIsPressed <- staticFunction wrapped_keyIsPressed
+                  test <- call native_keyIsPressed regV
+                  condBr test b2 b1
                 InstSkup iReg -> do
                   let reg =
                         getR iReg
@@ -170,8 +181,10 @@ genFunction linkage iGlobal registers instructions functionInstructions funcStar
                         getB a1
                       b2 =
                         getB a2
-                  -- TODO implement
-                  br b2
+                  regV <- load reg
+                  native_keyIsPressed <- staticFunction wrapped_keyIsPressed
+                  test <- call native_keyIsPressed regV
+                  condBr test b1 b2
                 InstCall _ ->
                   -- TODO: implement CALL
                   loop a2
@@ -340,8 +353,8 @@ genFunction linkage iGlobal registers instructions functionInstructions funcStar
       defineBasicBlock block
       loop addr
 
-mainFunc :: (HasCallStack) => Map Address InstructionData -> Map Address TraceFunction -> CodeGenModule (Function (IO ()))
-mainFunc instructions functions = do
+mainFunc :: (HasCallStack) => FunPtr (Word8 -> IO Bool) -> Map Address InstructionData -> Map Address TraceFunction -> CodeGenModule (Function (IO ()))
+mainFunc wrapped_keyIsPressed instructions functions = do
   setTarget "x86_64"
   setDataLayout "e"
   let createRegister i = do
@@ -366,7 +379,7 @@ mainFunc instructions functions = do
                   if addr == startAddress
                     then ExternalLinkage
                     else PrivateLinkage
-            func <- genFunction linkage iGlobal registers instructions functionInstructions addr
+            func <- genFunction linkage iGlobal wrapped_keyIsPressed registers instructions functionInstructions addr
             pure (addr, func)
         )
   pure $ generatedFunctions Map.! startAddress
@@ -381,8 +394,11 @@ main = do
         let TraceFunction {funcStart = func} =
               functions ! addr
         putStrLn $ "(" ++ show func ++ ") " ++ show addr ++ ":\t" ++ show inst
+      wrapped_keyIsPressed <- wrapKeyIsPressed keyIsPressed
       mainModule <- newModule
-      void $ defineModule mainModule $ mainFunc instructions functions
+      void $ defineModule mainModule $ mainFunc wrapped_keyIsPressed instructions functions
       -- optimizeRes <- optimizeModule 2 mainModule
       -- putStrLn $ "Optimize result: " ++ show optimizeRes
       writeBitcodeToFile "program.bitcode" mainModule
+      -- TODO run module
+      freeHaskellFunPtr wrapped_keyIsPressed
