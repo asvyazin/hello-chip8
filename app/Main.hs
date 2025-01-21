@@ -76,10 +76,17 @@ keyIsPressed _ = pure False
 foreign import ccall "wrapper"
   wrapKeyIsPressed :: (Word8 -> IO Bool) -> IO (FunPtr (Word8 -> IO Bool))
 
+draw :: Word16 -> Word8 -> Word8 -> Word8 -> IO ()
+draw spriteAddr screenX screenY spriteBytes = pure ()
+
+foreign import ccall "wrapper"
+  wrapDraw :: (Word16 -> Word8 -> Word8 -> Word8 -> IO ()) -> IO (FunPtr (Word16 -> Word8 -> Word8 -> Word8 -> IO ()))
+
 genFunction ::
   (HasCallStack) =>
   Global Word16 ->
   FunPtr (Word8 -> IO Bool) ->
+  FunPtr (Word16 -> Word8 -> Word8 -> Word8 -> IO ()) ->
   Map Address (Function (IO ())) ->
   Map Int (Global Word8) ->
   Map Address InstructionData ->
@@ -90,6 +97,7 @@ genFunction ::
 genFunction
   iGlobal
   wrapped_keyIsPressed
+  wrapped_draw
   allFunctions
   registers
   instructions
@@ -325,7 +333,15 @@ genFunction
                     store (valueOf w16) iGlobal
                     gotoNext a1
                   InstDraw iReg1 iReg2 w8 -> do
-                    -- TODO implement DRAW
+                    let reg1 =
+                          getR iReg1
+                        reg2 =
+                          getR iReg2
+                    reg1V <- load reg1
+                    reg2V <- load reg2
+                    iValue <- load iGlobal
+                    native_draw <- staticFunction wrapped_draw
+                    void $ call native_draw iValue reg1V reg2V (valueOf w8)
                     gotoNext a1
                   InstRand iReg w8 -> do
                     -- TODO implement RAND
@@ -374,8 +390,8 @@ genFunction
         defineBasicBlock block
         loop addr
 
-mainFunc :: (HasCallStack) => FunPtr (Word8 -> IO Bool) -> Map Address InstructionData -> Map Address TraceFunction -> CodeGenModule (Function (IO ()))
-mainFunc wrapped_keyIsPressed instructions functions = do
+mainFunc :: (HasCallStack) => FunPtr (Word8 -> IO Bool) -> FunPtr (Word16 -> Word8 -> Word8 -> Word8 -> IO ()) -> Map Address InstructionData -> Map Address TraceFunction -> CodeGenModule (Function (IO ()))
+mainFunc wrapped_keyIsPressed wrapped_draw instructions functions = do
   setTarget "x86_64"
   setDataLayout "e"
   let createRegister i = do
@@ -408,7 +424,7 @@ mainFunc wrapped_keyIsPressed instructions functions = do
     ( \addr -> do
         let curFunction =
               allFunctions Map.! addr
-        genFunction iGlobal wrapped_keyIsPressed allFunctions registers instructions functionInstructions addr curFunction
+        genFunction iGlobal wrapped_keyIsPressed wrapped_draw allFunctions registers instructions functionInstructions addr curFunction
     )
   pure $ allFunctions Map.! startAddress
 
@@ -423,10 +439,12 @@ main = do
               functions ! addr
         putStrLn $ "(" ++ show func ++ ") " ++ show addr ++ ":\t" ++ show inst
       wrapped_keyIsPressed <- wrapKeyIsPressed keyIsPressed
+      wrapped_draw <- wrapDraw draw
       mainModule <- newModule
-      void $ defineModule mainModule $ mainFunc wrapped_keyIsPressed instructions functions
+      void $ defineModule mainModule $ mainFunc wrapped_keyIsPressed wrapped_draw instructions functions
       -- optimizeRes <- optimizeModule 2 mainModule
       -- putStrLn $ "Optimize result: " ++ show optimizeRes
       writeBitcodeToFile "program.bitcode" mainModule
       -- TODO run module
+      freeHaskellFunPtr wrapped_draw
       freeHaskellFunPtr wrapped_keyIsPressed
