@@ -3,6 +3,7 @@
 module Main where
 
 import Control.Monad (forM, forM_, void)
+import Control.Monad.Random.Class (MonadRandom (getRandom))
 import Data.ByteString.Lazy qualified as BL
 import Data.List as List
 import Data.List.NonEmpty as NEList
@@ -77,16 +78,24 @@ foreign import ccall "wrapper"
   wrapKeyIsPressed :: (Word8 -> IO Bool) -> IO (FunPtr (Word8 -> IO Bool))
 
 draw :: Word16 -> Word8 -> Word8 -> Word8 -> IO ()
-draw spriteAddr screenX screenY spriteBytes = pure ()
+draw spriteAddr screenX screenY spriteBytes =
+  pure ()
 
 foreign import ccall "wrapper"
   wrapDraw :: (Word16 -> Word8 -> Word8 -> Word8 -> IO ()) -> IO (FunPtr (Word16 -> Word8 -> Word8 -> Word8 -> IO ()))
+
+randomW8 :: IO Word8
+randomW8 = getRandom
+
+foreign import ccall "wrapper"
+  wrapRandomW8 :: IO Word8 -> IO (FunPtr (IO Word8))
 
 genFunction ::
   (HasCallStack) =>
   Global Word16 ->
   FunPtr (Word8 -> IO Bool) ->
   FunPtr (Word16 -> Word8 -> Word8 -> Word8 -> IO ()) ->
+  FunPtr (IO Word8) ->
   Map Address (Function (IO ())) ->
   Map Int (Global Word8) ->
   Map Address InstructionData ->
@@ -98,6 +107,7 @@ genFunction
   iGlobal
   wrapped_keyIsPressed
   wrapped_draw
+  wrapped_randomW8
   allFunctions
   registers
   instructions
@@ -344,7 +354,12 @@ genFunction
                     void $ call native_draw iValue reg1V reg2V (valueOf w8)
                     gotoNext a1
                   InstRand iReg w8 -> do
-                    -- TODO implement RAND
+                    native_randomW8 <- staticFunction wrapped_randomW8
+                    let reg =
+                          getR iReg
+                    rndW8 <- call native_randomW8
+                    resW8 <- LLVM.Core.and rndW8 (valueOf w8)
+                    store resW8 reg
                     gotoNext a1
                   InstLoadD iReg -> do
                     -- TODO implement LOADD
@@ -390,43 +405,55 @@ genFunction
         defineBasicBlock block
         loop addr
 
-mainFunc :: (HasCallStack) => FunPtr (Word8 -> IO Bool) -> FunPtr (Word16 -> Word8 -> Word8 -> Word8 -> IO ()) -> Map Address InstructionData -> Map Address TraceFunction -> CodeGenModule (Function (IO ()))
-mainFunc wrapped_keyIsPressed wrapped_draw instructions functions = do
-  setTarget "x86_64"
-  setDataLayout "e"
-  let createRegister i = do
-        globalVar <- createGlobal True PrivateLinkage (constOf (0 :: Word8))
-        pure (i, globalVar)
-  registers <- Map.fromList <$> mapM createRegister [0 .. (registersCount - 1)]
-  iGlobal <- createGlobal True PrivateLinkage (constOf (0 :: Word16))
-  let functionInstructions =
-        Map.fromList $ List.map toMapPair $ NEList.groupBy onFst $ List.sortOn fst $ List.map swap $ Map.toList functions
-      onFst x y =
-        fst x == fst y
-      toMapPair l =
-        (unwrapFunc (fst (NEList.head l)), NEList.sort (NEList.map snd l))
-      unwrapFunc (TraceFunction addr) =
-        addr
-  let functionStarts =
-        Map.keys functionInstructions
-  allFunctions <-
-    Map.fromList
-      <$> forM
-        functionStarts
-        ( \addr -> do
-            let linkage =
-                  if addr == startAddress then ExternalLinkage else PrivateLinkage
-            func <- newNamedFunction linkage $ "func_" ++ show addr
-            pure (addr, func)
-        )
-  forM_
-    functionStarts
-    ( \addr -> do
-        let curFunction =
-              allFunctions Map.! addr
-        genFunction iGlobal wrapped_keyIsPressed wrapped_draw allFunctions registers instructions functionInstructions addr curFunction
-    )
-  pure $ allFunctions Map.! startAddress
+mainFunc ::
+  (HasCallStack) =>
+  FunPtr (Word8 -> IO Bool) ->
+  FunPtr (Word16 -> Word8 -> Word8 -> Word8 -> IO ()) ->
+  FunPtr (IO Word8) ->
+  Map Address InstructionData ->
+  Map Address TraceFunction ->
+  CodeGenModule (Function (IO ()))
+mainFunc
+  wrapped_keyIsPressed
+  wrapped_draw
+  wrapped_randomW8
+  instructions
+  functions = do
+    setTarget "x86_64"
+    setDataLayout "e"
+    let createRegister i = do
+          globalVar <- createGlobal True PrivateLinkage (constOf (0 :: Word8))
+          pure (i, globalVar)
+    registers <- Map.fromList <$> mapM createRegister [0 .. (registersCount - 1)]
+    iGlobal <- createGlobal True PrivateLinkage (constOf (0 :: Word16))
+    let functionInstructions =
+          Map.fromList $ List.map toMapPair $ NEList.groupBy onFst $ List.sortOn fst $ List.map swap $ Map.toList functions
+        onFst x y =
+          fst x == fst y
+        toMapPair l =
+          (unwrapFunc (fst (NEList.head l)), NEList.sort (NEList.map snd l))
+        unwrapFunc (TraceFunction addr) =
+          addr
+    let functionStarts =
+          Map.keys functionInstructions
+    allFunctions <-
+      Map.fromList
+        <$> forM
+          functionStarts
+          ( \addr -> do
+              let linkage =
+                    if addr == startAddress then ExternalLinkage else PrivateLinkage
+              func <- newNamedFunction linkage $ "func_" ++ show addr
+              pure (addr, func)
+          )
+    forM_
+      functionStarts
+      ( \addr -> do
+          let curFunction =
+                allFunctions Map.! addr
+          genFunction iGlobal wrapped_keyIsPressed wrapped_draw wrapped_randomW8 allFunctions registers instructions functionInstructions addr curFunction
+      )
+    pure $ allFunctions Map.! startAddress
 
 main :: IO ()
 main = do
@@ -440,11 +467,13 @@ main = do
         putStrLn $ "(" ++ show func ++ ") " ++ show addr ++ ":\t" ++ show inst
       wrapped_keyIsPressed <- wrapKeyIsPressed keyIsPressed
       wrapped_draw <- wrapDraw draw
+      wrapped_randomW8 <- wrapRandomW8 randomW8
       mainModule <- newModule
-      void $ defineModule mainModule $ mainFunc wrapped_keyIsPressed wrapped_draw instructions functions
+      void $ defineModule mainModule $ mainFunc wrapped_keyIsPressed wrapped_draw wrapped_randomW8 instructions functions
       -- optimizeRes <- optimizeModule 2 mainModule
       -- putStrLn $ "Optimize result: " ++ show optimizeRes
       writeBitcodeToFile "program.bitcode" mainModule
       -- TODO run module
+      freeHaskellFunPtr wrapped_randomW8
       freeHaskellFunPtr wrapped_draw
       freeHaskellFunPtr wrapped_keyIsPressed
