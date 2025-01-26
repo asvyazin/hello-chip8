@@ -79,7 +79,7 @@ foreign import ccall "wrapper"
 
 draw :: Word16 -> Word8 -> Word8 -> Word8 -> IO ()
 draw spriteAddr screenX screenY spriteBytes =
-  pure ()
+  pure () -- TODO
 
 foreign import ccall "wrapper"
   wrapDraw :: (Word16 -> Word8 -> Word8 -> Word8 -> IO ()) -> IO (FunPtr (Word16 -> Word8 -> Word8 -> Word8 -> IO ()))
@@ -91,10 +91,16 @@ foreign import ccall "wrapper"
   wrapRandomW8 :: IO Word8 -> IO (FunPtr (IO Word8))
 
 setWord8 :: Word16 -> Word8 -> IO ()
-setWord8 addr w8 = pure ()
+setWord8 addr w8 = pure () -- TODO
 
 foreign import ccall "wrapper"
   wrapSetWord8 :: (Word16 -> Word8 -> IO ()) -> IO (FunPtr (Word16 -> Word8 -> IO ()))
+
+getWord8 :: Word16 -> IO Word8
+getWord8 addr = pure 0 -- TODO
+
+foreign import ccall "wrapper"
+  wrapGetWord8 :: (Word16 -> IO Word8) -> IO (FunPtr (Word16 -> IO Word8))
 
 genFunction ::
   (HasCallStack) =>
@@ -103,6 +109,7 @@ genFunction ::
   FunPtr (Word16 -> Word8 -> Word8 -> Word8 -> IO ()) ->
   FunPtr (IO Word8) ->
   FunPtr (Word16 -> Word8 -> IO ()) ->
+  FunPtr (Word16 -> IO Word8) ->
   Map Address (Function (IO ())) ->
   Map Int (Global Word8) ->
   Map Address InstructionData ->
@@ -116,6 +123,7 @@ genFunction
   wrapped_draw
   wrapped_randomW8
   wrapped_setWord8
+  wrapped_getWord8
   allFunctions
   registers
   instructions
@@ -406,8 +414,22 @@ genFunction
                   InstBcd iReg -> do
                     -- TODO implement BCD
                     gotoNext a1
-                  InstRead iReg -> do
-                    -- TODO implement READ
+                  InstRead (Register iReg) -> do
+                    native_getWord8 <- staticFunction wrapped_getWord8
+                    iv <- load iGlobal
+                    let readLoop curAddrV curReg
+                          | curReg == iReg =
+                              readReg curAddrV curReg
+                          | otherwise = do
+                              readReg curAddrV curReg
+                              newAddrV <- add curAddrV (valueOf 2)
+                              readLoop newAddrV (curReg + 1)
+                        readReg addrV curReg = do
+                          let reg =
+                                getR (Register curReg)
+                          v <- call native_getWord8 addrV
+                          store v reg
+                    readLoop iv (0 :: Word8)
                     gotoNext a1
                   InstLdspr iReg -> do
                     -- TODO implement LDSPR
@@ -431,6 +453,7 @@ mainFunc ::
   FunPtr (Word16 -> Word8 -> Word8 -> Word8 -> IO ()) ->
   FunPtr (IO Word8) ->
   FunPtr (Word16 -> Word8 -> IO ()) ->
+  FunPtr (Word16 -> IO Word8) ->
   Map Address InstructionData ->
   Map Address TraceFunction ->
   CodeGenModule (Function (IO ()))
@@ -439,6 +462,7 @@ mainFunc
   wrapped_draw
   wrapped_randomW8
   wrapped_setWord8
+  wrapped_getWord8
   instructions
   functions = do
     setTarget "x86_64"
@@ -473,7 +497,7 @@ mainFunc
       ( \addr -> do
           let curFunction =
                 allFunctions Map.! addr
-          genFunction iGlobal wrapped_keyIsPressed wrapped_draw wrapped_randomW8 wrapped_setWord8 allFunctions registers instructions functionInstructions addr curFunction
+          genFunction iGlobal wrapped_keyIsPressed wrapped_draw wrapped_randomW8 wrapped_setWord8 wrapped_getWord8 allFunctions registers instructions functionInstructions addr curFunction
       )
     pure $ allFunctions Map.! startAddress
 
@@ -491,12 +515,14 @@ main = do
       wrapped_draw <- wrapDraw draw
       wrapped_randomW8 <- wrapRandomW8 randomW8
       wrapped_setWord8 <- wrapSetWord8 setWord8
+      wrapped_getWord8 <- wrapGetWord8 getWord8
       mainModule <- newModule
-      void $ defineModule mainModule $ mainFunc wrapped_keyIsPressed wrapped_draw wrapped_randomW8 wrapped_setWord8 instructions functions
+      void $ defineModule mainModule $ mainFunc wrapped_keyIsPressed wrapped_draw wrapped_randomW8 wrapped_setWord8 wrapped_getWord8 instructions functions
       -- optimizeRes <- optimizeModule 2 mainModule
       -- putStrLn $ "Optimize result: " ++ show optimizeRes
       writeBitcodeToFile "program.bitcode" mainModule
       -- TODO run module
+      freeHaskellFunPtr wrapped_getWord8
       freeHaskellFunPtr wrapped_setWord8
       freeHaskellFunPtr wrapped_randomW8
       freeHaskellFunPtr wrapped_draw
