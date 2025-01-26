@@ -90,12 +90,19 @@ randomW8 = getRandom
 foreign import ccall "wrapper"
   wrapRandomW8 :: IO Word8 -> IO (FunPtr (IO Word8))
 
+setWord8 :: Word16 -> Word8 -> IO ()
+setWord8 addr w8 = pure ()
+
+foreign import ccall "wrapper"
+  wrapSetWord8 :: (Word16 -> Word8 -> IO ()) -> IO (FunPtr (Word16 -> Word8 -> IO ()))
+
 genFunction ::
   (HasCallStack) =>
   Global Word16 ->
   FunPtr (Word8 -> IO Bool) ->
   FunPtr (Word16 -> Word8 -> Word8 -> Word8 -> IO ()) ->
   FunPtr (IO Word8) ->
+  FunPtr (Word16 -> Word8 -> IO ()) ->
   Map Address (Function (IO ())) ->
   Map Int (Global Word8) ->
   Map Address InstructionData ->
@@ -108,6 +115,7 @@ genFunction
   wrapped_keyIsPressed
   wrapped_draw
   wrapped_randomW8
+  wrapped_setWord8
   allFunctions
   registers
   instructions
@@ -378,10 +386,22 @@ genFunction
                           getR iReg
                     store (valueOf (0 :: Word8)) reg
                     gotoNext a1
-                  InstStor iReg -> do
-                    let reg =
-                          getR iReg
-                    -- TODO implement STOR
+                  InstStor (Register iReg) -> do
+                    native_setWord8 <- staticFunction wrapped_setWord8
+                    iv <- load iGlobal
+                    let storLoop curAddrV curReg
+                          | curReg == iReg =
+                              storReg curAddrV curReg
+                          | otherwise = do
+                              storReg curAddrV curReg
+                              newAddrV <- add curAddrV (valueOf 2)
+                              storLoop newAddrV (curReg + 1)
+                        storReg addrV curReg = do
+                          let reg =
+                                getR (Register curReg)
+                          v <- load reg
+                          void $ call native_setWord8 addrV v
+                    storLoop iv (0 :: Word8)
                     gotoNext a1
                   InstBcd iReg -> do
                     -- TODO implement BCD
@@ -410,6 +430,7 @@ mainFunc ::
   FunPtr (Word8 -> IO Bool) ->
   FunPtr (Word16 -> Word8 -> Word8 -> Word8 -> IO ()) ->
   FunPtr (IO Word8) ->
+  FunPtr (Word16 -> Word8 -> IO ()) ->
   Map Address InstructionData ->
   Map Address TraceFunction ->
   CodeGenModule (Function (IO ()))
@@ -417,6 +438,7 @@ mainFunc
   wrapped_keyIsPressed
   wrapped_draw
   wrapped_randomW8
+  wrapped_setWord8
   instructions
   functions = do
     setTarget "x86_64"
@@ -451,7 +473,7 @@ mainFunc
       ( \addr -> do
           let curFunction =
                 allFunctions Map.! addr
-          genFunction iGlobal wrapped_keyIsPressed wrapped_draw wrapped_randomW8 allFunctions registers instructions functionInstructions addr curFunction
+          genFunction iGlobal wrapped_keyIsPressed wrapped_draw wrapped_randomW8 wrapped_setWord8 allFunctions registers instructions functionInstructions addr curFunction
       )
     pure $ allFunctions Map.! startAddress
 
@@ -468,12 +490,14 @@ main = do
       wrapped_keyIsPressed <- wrapKeyIsPressed keyIsPressed
       wrapped_draw <- wrapDraw draw
       wrapped_randomW8 <- wrapRandomW8 randomW8
+      wrapped_setWord8 <- wrapSetWord8 setWord8
       mainModule <- newModule
-      void $ defineModule mainModule $ mainFunc wrapped_keyIsPressed wrapped_draw wrapped_randomW8 instructions functions
+      void $ defineModule mainModule $ mainFunc wrapped_keyIsPressed wrapped_draw wrapped_randomW8 wrapped_setWord8 instructions functions
       -- optimizeRes <- optimizeModule 2 mainModule
       -- putStrLn $ "Optimize result: " ++ show optimizeRes
       writeBitcodeToFile "program.bitcode" mainModule
       -- TODO run module
+      freeHaskellFunPtr wrapped_setWord8
       freeHaskellFunPtr wrapped_randomW8
       freeHaskellFunPtr wrapped_draw
       freeHaskellFunPtr wrapped_keyIsPressed
