@@ -15,6 +15,7 @@ import Foreign.Ptr
 import GHC.Stack (HasCallStack)
 import Instructions
 import LLVM.Core
+import LLVM.Util.Optimize
 import Tracing
 
 newtype TraceFunction = TraceFunction {funcStart :: Address} deriving (Eq, Ord)
@@ -182,7 +183,7 @@ genFunction
                         b2 =
                           getB a2
                     regV <- load reg
-                    test <- cmp CmpEQ regV (constOf w8)
+                    test <- cmp CmpEQ regV (valueOf w8)
                     condBr test b2 b1
                   InstSkne iReg w8 -> do
                     let reg =
@@ -192,7 +193,7 @@ genFunction
                         b2 =
                           getB a2
                     regV <- load reg
-                    test <- cmp CmpNE regV (constOf w8)
+                    test <- cmp CmpNE regV (valueOf w8)
                     condBr test b2 b1
                   InstSkre iReg1 iReg2 -> do
                     let reg1 =
@@ -518,8 +519,9 @@ main = do
       wrapped_getWord8 <- wrapGetWord8 getWord8
       mainModule <- newModule
       void $ defineModule mainModule $ mainFunc wrapped_keyIsPressed wrapped_draw wrapped_randomW8 wrapped_setWord8 wrapped_getWord8 instructions functions
-      -- optimizeRes <- optimizeModule 2 mainModule
-      -- putStrLn $ "Optimize result: " ++ show optimizeRes
+      initializeNativeTarget
+      optimizeRes <- optimizeModule 2 mainModule
+      putStrLn $ "Optimize result: " ++ show optimizeRes
       writeBitcodeToFile "program.bitcode" mainModule
       -- TODO run module
       freeHaskellFunPtr wrapped_getWord8
